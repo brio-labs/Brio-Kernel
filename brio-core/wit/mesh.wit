@@ -1,0 +1,8 @@
+interface service-mesh {
+    variant payload {
+        json(string),
+        binary(list<u8>)
+    }
+
+    call: func(target: string, method: string, args: payload) -> result<payload, string>;
+}

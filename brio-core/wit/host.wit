@@ -1,39 +1,18 @@
-package brio:core;
-
-// 1. Service Mesh
-interface service-mesh {
-    variant payload {
-        json(string),
-        binary(list<u8>)
-    }
-    call: func(target: string, method: string, args: payload) -> result<payload, string>;
-}
-
-// 2. State (SQL)
 interface sql-state {
     record row {
         columns: list<string>,
         values: list<string>
     }
+
     // Agents/Supervisor can execute queries restricted to their scope
     query: func(sql: string, params: list<string>) -> result<list<row>, string>;
     execute: func(sql: string, params: list<string>) -> result<u32, string>;
 }
 
-// 3. Workspace VFS
 interface session-fs {
     // Creates a sandboxed copy of the target directory
     begin-session: func(base-path: string) -> result<string, string>;
-    
-    // Applies changes back to the original directory
-    // result<_, string> translates to an empty success value or string error
-    commit-session: func(session-id: string) -> result<tuple<>, string>;
-}
 
-// 4. The World
-world brio-host {
-    import service-mesh;
-    import sql-state;
-    import session-fs;
-    import wasi:logging/logging;
+    // Applies changes back to the original directory
+    commit-session: func(session-id: string) -> result<tuple<>, string>;
 }
