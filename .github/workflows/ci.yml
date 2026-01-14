@@ -94,10 +94,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ env.WORKING_DIR }}
-      - name: Install cargo-tarpaulin
-        uses: taiki-e/install-action@cargo-tarpaulin
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage
-        run: cargo tarpaulin --verbose --workspace --timeout 120 --out Xml
+        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
         working-directory: ${{ env.WORKING_DIR }}
 
   doc:
