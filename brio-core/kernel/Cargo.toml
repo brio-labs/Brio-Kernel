@@ -8,7 +8,11 @@ tokio = { version = "1.0", features = ["full"] }
 wasmtime = { version = "40.0.1", features = ["component-model"] }
 wasmtime-wasi = "40.0.1"
 wit-bindgen = "0.51.0"
-sqlx = { version = "0.8.6", features = ["sqlite", "runtime-tokio"] }
+sqlx = { version = "0.8.6", default-features = false, features = [
+    "sqlite",
+    "runtime-tokio",
+    "macros",
+] }
 uuid = { version = "1.0", features = ["v4"] }
 fs_extra = "1.3"
 anyhow = "1.0"
