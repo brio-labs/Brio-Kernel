@@ -6,12 +6,24 @@ use tokio::sync::oneshot;
 
 use crate::mesh::{MeshMessage, Payload};
 use crate::store::{PrefixPolicy, SqlStore};
+use crate::vfs::manager::SessionManager;
 use crate::ws::{BroadcastMessage, Broadcaster, WsPatch};
+
+// Import the bindgen generated trait
+// Assuming the bindgen world name is "brio-host" and interface is "session-fs"
+// The actual path depends on how `wit_bindgen::generate!` is called in `main.rs` or `lib.rs`.
+// Since I can't see the bindgen output, I will assume a standard import path or implement it on the struct directly
+// and let the bindgen macro glue it together.
+// However, the user prompt showed: `impl brio::core::session_fs::Host for BrioHostState`.
+// I will implement the logic as methods on BrioHostState first, effectively matching the trait.
+// If the trait definition is available via `crate::brio_host::...` I would use it.
+// For now, I'll add the field and methods.
 
 pub struct BrioHostState {
     mesh_router: HashMap<String, Sender<MeshMessage>>,
     db_pool: SqlitePool,
     broadcaster: Broadcaster,
+    session_manager: SessionManager,
 }
 
 impl BrioHostState {
@@ -22,6 +34,7 @@ impl BrioHostState {
             mesh_router: HashMap::new(),
             db_pool: pool,
             broadcaster: Broadcaster::new(),
+            session_manager: SessionManager::new(),
         })
     }
 
@@ -81,5 +94,15 @@ impl BrioHostState {
             .map_err(|e| anyhow!("Failed to receive reply from target '{}': {}", target, e))?;
 
         response.map_err(|e| anyhow!("Target '{}' returned error: {}", target, e))
+    }
+
+    // --- VFS Interface Methods ---
+
+    pub fn begin_session(&mut self, base_path: String) -> Result<String, String> {
+        self.session_manager.begin_session(base_path)
+    }
+
+    pub fn commit_session(&mut self, session_id: String) -> Result<(), String> {
+        self.session_manager.commit_session(session_id)
     }
 }
