@@ -1,12 +1,23 @@
 use super::{diff, reflink};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::PathBuf;
-use tracing::{info, instrument};
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use tracing::{info, instrument, warn};
 use uuid::Uuid;
+use walkdir::WalkDir;
+
+/// Represents a session with its base path and snapshot hash
+struct SessionInfo {
+    base_path: PathBuf,
+    /// Hash of the base directory at session start (for conflict detection)
+    base_snapshot_hash: String,
+}
 
 pub struct SessionManager {
-    // Map SessionID -> BasePath
-    sessions: HashMap<String, PathBuf>,
+    // Map SessionID -> SessionInfo
+    sessions: HashMap<String, SessionInfo>,
     root_temp_dir: PathBuf,
 }
 
@@ -18,6 +29,44 @@ impl SessionManager {
             sessions: HashMap::new(),
             root_temp_dir: temp,
         }
+    }
+
+    /// Computes a combined hash of all files in a directory for conflict detection.
+    fn compute_directory_hash(path: &Path) -> Result<String, String> {
+        let mut hasher = Sha256::new();
+        let mut count = 0;
+
+        for entry in WalkDir::new(path).sort_by_file_name() {
+            let entry = entry.map_err(|e| format!("Failed to walk directory: {}", e))?;
+            let file_path = entry.path();
+
+            if file_path.is_file() {
+                // Include relative path in hash to detect renames
+                let relative = file_path
+                    .strip_prefix(path)
+                    .map_err(|e| format!("Failed to strip prefix: {}", e))?;
+                hasher.update(relative.to_string_lossy().as_bytes());
+
+                // Include file content hash
+                let mut file = fs::File::open(file_path)
+                    .map_err(|e| format!("Failed to open file {:?}: {}", file_path, e))?;
+                let mut buffer = [0u8; 8192];
+                loop {
+                    let bytes_read = file
+                        .read(&mut buffer)
+                        .map_err(|e| format!("Failed to read file {:?}: {}", file_path, e))?;
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    hasher.update(&buffer[..bytes_read]);
+                }
+                count += 1;
+            }
+        }
+
+        // Include file count to detect deletions
+        hasher.update(count.to_string().as_bytes());
+        Ok(hex::encode(hasher.finalize()))
     }
 
     /// Creates a new session by copying (reflink) the base directory.
@@ -33,28 +82,56 @@ impl SessionManager {
 
         info!("Starting session {} for base {:?}", session_id, base);
 
+        // Compute snapshot hash before copying
+        let base_snapshot_hash = Self::compute_directory_hash(&base)?;
+
         // Perform Reflink Copy
         reflink::copy_dir_reflink(&base, &session_path)
             .map_err(|e| format!("Failed to create session copy: {}", e))?;
 
-        // Store session mapping
-        self.sessions.insert(session_id.clone(), base);
+        // Store session mapping with snapshot
+        self.sessions.insert(
+            session_id.clone(),
+            SessionInfo {
+                base_path: base,
+                base_snapshot_hash,
+            },
+        );
 
         Ok(session_id)
     }
 
     /// Commits changes from the session back to the base directory.
+    /// Returns an error if the base directory has been modified since session start.
     #[instrument(skip(self))]
     pub fn commit_session(&mut self, session_id: String) -> Result<(), String> {
-        let base_path = self
+        let session_info = self
             .sessions
             .get(&session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
+        let base_path = &session_info.base_path;
+        let original_hash = &session_info.base_snapshot_hash;
         let session_path = self.root_temp_dir.join(&session_id);
 
         if !session_path.exists() {
             return Err(format!("Session directory lost: {:?}", session_path));
+        }
+
+        // Conflict detection: re-hash base and compare
+        let current_hash = Self::compute_directory_hash(base_path)?;
+        if &current_hash != original_hash {
+            warn!(
+                "Conflict detected for session {}: base directory has been modified",
+                session_id
+            );
+            return Err(format!(
+                "Conflict: base directory '{}' has been modified since session started. \
+                 Original hash: {}, Current hash: {}",
+                base_path.display(),
+                original_hash,
+                current_hash
+            ));
         }
 
         info!("Committing session {} to {:?}", session_id, base_path);
@@ -72,7 +149,9 @@ impl SessionManager {
         diff::apply_changes(&session_path, base_path, &changes)
             .map_err(|e| format!("Failed to apply changes: {}", e))?;
 
-        // 3. Cleanup
+        // 3. Cleanup session from map
+        self.sessions.remove(&session_id);
+
         Ok(())
     }
 }

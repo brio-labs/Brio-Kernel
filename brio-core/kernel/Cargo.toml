@@ -52,3 +52,5 @@ async-trait = "0.1"
 
 [dev-dependencies]
 supervisor = { path = "../components/supervisor" }
+wiremock = "0.6"
+proptest = "1"
