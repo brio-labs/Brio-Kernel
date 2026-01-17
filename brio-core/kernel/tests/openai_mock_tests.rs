@@ -9,10 +9,11 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 async fn create_provider_with_mock_server(server: &MockServer) -> OpenAIProvider {
-    let config = OpenAIConfig {
-        api_key: SecretString::new("test-api-key".into()),
-        base_url: Url::parse(&format!("{}/", server.uri())).unwrap(),
-    };
+    let config = OpenAIConfig::new(
+        SecretString::new("test-api-key".into()),
+        Url::parse(&format!("{}/", server.uri())).unwrap(),
+    )
+    .with_max_retries(0); // Disable retries for faster tests
     OpenAIProvider::new(config)
 }
 

@@ -313,10 +313,10 @@ async fn manifesto_scenario_real_ai() -> Result<()> {
 
     // 2. Setup Real Provider
     // Clean Code: Secure config
-    let config = brio_kernel::inference::OpenAIConfig {
-        api_key: secrecy::SecretString::new(api_key.into()),
-        base_url: reqwest::Url::parse("https://openrouter.ai/api/v1/")?,
-    };
+    let config = brio_kernel::inference::OpenAIConfig::new(
+        secrecy::SecretString::new(api_key.into()),
+        reqwest::Url::parse("https://openrouter.ai/api/v1/")?,
+    );
     let provider = brio_kernel::inference::OpenAIProvider::new(config);
 
     // 3. Arrange Environment
