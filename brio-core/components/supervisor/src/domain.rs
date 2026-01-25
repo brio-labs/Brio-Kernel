@@ -179,6 +179,17 @@ impl TaskStatus {
             Self::Failed => "failed",
         }
     }
+
+    /// Returns a list of all statuses considered "active" (managed by supervisor).
+    pub const fn active_states() -> &'static [Self] {
+        &[
+            Self::Pending,
+            Self::Planning,
+            Self::Executing,
+            Self::Coordinating,
+            Self::Verifying,
+        ]
+    }
 }
 
 /// Error when parsing an unknown status string.
@@ -282,15 +293,8 @@ impl Task {
 
     /// Checks if this task is active (managed by supervisor).
     #[must_use]
-    pub const fn is_active(&self) -> bool {
-        matches!(
-            self.status,
-            TaskStatus::Pending
-                | TaskStatus::Planning
-                | TaskStatus::Executing
-                | TaskStatus::Coordinating
-                | TaskStatus::Verifying
-        )
+    pub fn is_active(&self) -> bool {
+        TaskStatus::active_states().contains(&self.status)
     }
 }
 

@@ -174,21 +174,28 @@ impl Default for WitTaskRepository {
 impl TaskRepository for WitTaskRepository {
     fn fetch_active_tasks(&self) -> Result<Vec<Task>, RepositoryError> {
         // Fetch all non-terminal states
-        let sql = "SELECT id, content, priority, status, parent_id, assigned_agent \
-                   FROM tasks \
-                   WHERE status IN (?, ?, ?, ?, ?) \
-                   ORDER BY priority DESC";
+        let active_states = TaskStatus::active_states();
+        let placeholders = active_states
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
 
-        let params = vec![
-            TaskStatus::Pending.as_str().to_string(),
-            TaskStatus::Planning.as_str().to_string(),
-            TaskStatus::Executing.as_str().to_string(),
-            TaskStatus::Coordinating.as_str().to_string(),
-            TaskStatus::Verifying.as_str().to_string(),
-        ];
+        let sql = format!(
+            "SELECT id, content, priority, status, parent_id, assigned_agent \
+             FROM tasks \
+             WHERE status IN ({}) \
+             ORDER BY priority DESC",
+            placeholders
+        );
+
+        let params: Vec<String> = active_states
+            .iter()
+            .map(|s| s.as_str().to_string())
+            .collect();
 
         let rows =
-            wit_bindings::sql_state::query(sql, &params).map_err(RepositoryError::SqlError)?;
+            wit_bindings::sql_state::query(&sql, &params).map_err(RepositoryError::SqlError)?;
 
         rows.iter()
             .map(|row| Self::parse_row(&row.columns, &row.values))
