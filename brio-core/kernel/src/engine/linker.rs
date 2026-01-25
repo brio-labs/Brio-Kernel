@@ -20,9 +20,8 @@ impl brio::core::service_mesh::Host for BrioHostState {
 
         // Bridge sync to async
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                self.mesh_call(&target, &method, internal_payload).await
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async { self.mesh_call(&target, &method, internal_payload).await })
         });
 
         // Convert result back to WASM payload
@@ -46,9 +45,8 @@ impl brio::core::sql_state::Host for BrioHostState {
         let store = self.get_store(scope);
 
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                store.query(scope, &sql, params).await
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async { store.query(scope, &sql, params).await })
         });
 
         result
@@ -68,9 +66,8 @@ impl brio::core::sql_state::Host for BrioHostState {
         let store = self.get_store(scope);
 
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                store.execute(scope, &sql, params).await
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async { store.execute(scope, &sql, params).await })
         });
 
         result.map_err(|e| e.to_string())
@@ -116,14 +113,15 @@ impl brio::core::inference::Host for BrioHostState {
 
         let inference_provider = match self.inference() {
             Some(provider) => provider,
-            None => return Err(brio::core::inference::InferenceError::ProviderError(
-                "No default inference provider configured".to_string()
-            )),
+            None => {
+                return Err(brio::core::inference::InferenceError::ProviderError(
+                    "No default inference provider configured".to_string(),
+                ));
+            }
         };
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                inference_provider.chat(request).await
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async { inference_provider.chat(request).await })
         });
 
         result
@@ -198,6 +196,7 @@ fn register_host_interfaces(linker: &mut Linker<BrioHostState>) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn stub_error(interface: &str) -> String {
     format!("Interface '{}' not yet implemented via WASM", interface)
 }
