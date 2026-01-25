@@ -13,7 +13,7 @@ fn test_session_begin_with_nonexistent_path() {
     let result = manager.begin_session("/nonexistent/path/that/does/not/exist".to_string());
 
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("does not exist"));
+    assert!(result.unwrap_err().contains("Invalid base path"));
 }
 
 #[test]
