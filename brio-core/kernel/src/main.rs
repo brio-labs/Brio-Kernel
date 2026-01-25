@@ -28,6 +28,25 @@ async fn main() -> anyhow::Result<()> {
         component: "Kernel".into(),
     });
 
+    // Initialize Wasmtime Engine
+    let engine_config = brio_kernel::engine::linker::create_engine_config();
+    let engine = wasmtime::Engine::new(&engine_config).expect("Failed to create Wasmtime engine");
+
+    // Initialize Plugin Registry
+    let mut plugin_registry = brio_kernel::registry::PluginRegistry::new(engine);
+    let plugins_dir = std::env::current_dir().unwrap_or_default().join("plugins");
+
+    // Scan for plugins
+    if let Err(e) = plugin_registry.load_from_directory(&plugins_dir).await {
+        error!("Failed to load plugins from {:?}: {:?}", plugins_dir, e);
+    } else {
+        let plugins = plugin_registry.list_plugins();
+        info!("Loaded {} plugins from {:?}", plugins.len(), plugins_dir);
+        for p in plugins {
+            info!(" - Plugin: {} ({:?})", p.id, p.path);
+        }
+    }
+
     let db_url = config.database.url.expose_secret();
 
     // Clean Code: Configure Provider (DIP)
