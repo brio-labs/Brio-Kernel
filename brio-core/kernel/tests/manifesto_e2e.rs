@@ -6,7 +6,7 @@ use sqlx::Row;
 use std::sync::Arc;
 use supervisor::domain::{AgentId, Priority, Task, TaskId, TaskStatus};
 use supervisor::mesh_client::{AgentDispatcher, DispatchResult, MeshError};
-use supervisor::orchestrator::Supervisor;
+use supervisor::orchestrator::{Planner, PlannerError, Supervisor};
 use supervisor::repository::{RepositoryError, TaskRepository};
 use tokio::sync::mpsc;
 
@@ -83,17 +83,24 @@ impl LLMProvider for MockProvider {
     }
 }
 
+struct MockPlanner;
+impl Planner for MockPlanner {
+    fn plan(&self, _objective: &str) -> Result<(), PlannerError> {
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 struct TestTaskRepository {
     host: Arc<BrioHostState>,
 }
 
 impl TaskRepository for TestTaskRepository {
-    fn fetch_pending_tasks(&self) -> Result<Vec<Task>, RepositoryError> {
+    fn fetch_active_tasks(&self) -> Result<Vec<Task>, RepositoryError> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let rows = sqlx::query(
-                    "SELECT * FROM tasks WHERE status = 'pending' ORDER BY priority DESC",
+                    "SELECT * FROM tasks WHERE status IN ('pending', 'planning', 'executing', 'verifying') ORDER BY priority DESC",
                 )
                 .fetch_all(self.host.db())
                 .await
@@ -104,13 +111,18 @@ impl TaskRepository for TestTaskRepository {
                         let id: i64 = r.try_get("id").unwrap();
                         let content: String = r.try_get("content").unwrap();
                         let priority: i64 = r.try_get("priority").unwrap();
+                        let status_str: String = r.try_get("status").unwrap();
+                        let status = TaskStatus::parse(&status_str).map_err(|e| RepositoryError::ParseError(e.to_string()))?;
+
+                        let assigned_agent_str: Option<String> = r.try_get("assigned_agent").unwrap_or(None);
+                        let assigned_agent = assigned_agent_str.map(AgentId::new);
 
                         Ok(Task::new(
                             TaskId::new(id as u64),
                             content,
                             Priority::new(priority as u8),
-                            TaskStatus::Pending,
-                            None,
+                            status,
+                            assigned_agent,
                         ))
                     })
                     .collect()
@@ -118,7 +130,34 @@ impl TaskRepository for TestTaskRepository {
         })
     }
 
-    // ... Implement other methods similarly (omitted for brevity in this specific rewrite but would be needed)
+    fn update_status(&self, task_id: TaskId, status: TaskStatus) -> Result<(), RepositoryError> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                sqlx::query("UPDATE tasks SET status = ? WHERE id = ?")
+                    .bind(status.as_str())
+                    .bind(task_id.inner() as i64)
+                    .execute(self.host.db())
+                    .await
+                    .map_err(|e| RepositoryError::SqlError(e.to_string()))?;
+                Ok(())
+            })
+        })
+    }
+
+    fn assign_agent(&self, task_id: TaskId, agent: &AgentId) -> Result<(), RepositoryError> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                sqlx::query("UPDATE tasks SET assigned_agent = ? WHERE id = ?")
+                    .bind(agent.as_str())
+                    .bind(task_id.inner() as i64)
+                    .execute(self.host.db())
+                    .await
+                    .map_err(|e| RepositoryError::SqlError(e.to_string()))?;
+                Ok(())
+            })
+        })
+    }
+
     fn mark_assigned(&self, task_id: TaskId, agent: &AgentId) -> Result<(), RepositoryError> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -135,11 +174,31 @@ impl TaskRepository for TestTaskRepository {
         })
     }
 
-    fn mark_completed(&self, _task_id: TaskId) -> Result<(), RepositoryError> {
-        Ok(())
+    fn mark_completed(&self, task_id: TaskId) -> Result<(), RepositoryError> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                sqlx::query("UPDATE tasks SET status = 'completed' WHERE id = ?")
+                    .bind(task_id.inner() as i64)
+                    .execute(self.host.db())
+                    .await
+                    .map_err(|e| RepositoryError::SqlError(e.to_string()))?;
+                Ok(())
+            })
+        })
     }
-    fn mark_failed(&self, _task_id: TaskId, _reason: &str) -> Result<(), RepositoryError> {
-        Ok(())
+
+    fn mark_failed(&self, task_id: TaskId, reason: &str) -> Result<(), RepositoryError> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                sqlx::query("UPDATE tasks SET status = 'failed', failure_reason = ? WHERE id = ?")
+                    .bind(reason)
+                    .bind(task_id.inner() as i64)
+                    .execute(self.host.db())
+                    .await
+                    .map_err(|e| RepositoryError::SqlError(e.to_string()))?;
+                Ok(())
+            })
+        })
     }
 }
 
@@ -191,7 +250,10 @@ async fn manifesto_scenario_agent_fixing_bug() -> Result<()> {
 
     // 4. Act: Run Supervisor
     let processed = run_supervisor_cycle(env.host.clone()).await?;
-    assert_eq!(processed, 1, "Should process 1 task");
+    assert!(
+        processed >= 1,
+        "Should process at least 1 task state transition"
+    );
 
     // 5. Assert (State Verification)
     let content = std::fs::read_to_string(project_file)?;
@@ -216,8 +278,17 @@ async fn run_supervisor_cycle(host: Arc<BrioHostState>) -> Result<u32> {
     tokio::task::spawn_blocking(move || {
         let repo = TestTaskRepository { host: host.clone() };
         let dispatcher = TestDispatcher { host };
-        let supervisor = Supervisor::new(repo, dispatcher);
-        Ok(supervisor.poll_pending_tasks().unwrap()) // Unwrap only in test context
+        let planner = MockPlanner;
+        let supervisor = Supervisor::new(repo, dispatcher, planner);
+        let mut total = 0;
+        loop {
+            let n = supervisor.poll_tasks().unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        Ok(total)
     })
     .await?
 }
@@ -338,7 +409,10 @@ async fn manifesto_scenario_real_ai() -> Result<()> {
     // 5. Act: Create Task & Run Supervisor
     create_bug_fix_task(&env.host).await?;
     let processed = run_supervisor_cycle(env.host.clone()).await?;
-    assert_eq!(processed, 1, "Should process 1 task");
+    assert!(
+        processed >= 1,
+        "Should process at least 1 task state transition"
+    );
 
     // 6. Assert
     // Give slight delay for async file I/O propagation if needed,
