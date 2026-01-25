@@ -1,0 +1,22 @@
+package brio:std-tool;
+
+// Standard interface that all agent tools must implement
+interface tool {
+    record tool-info {
+        name: string,
+        description: string,
+        version: string,
+    }
+
+    // Returns metadata about the tool
+    get-info: func() -> tool-info;
+
+    // Executes the tool with JSON parameters
+    // params: JSON string matching the tool's schema
+    // returns: JSON string result or error message
+    execute: func(params: string) -> result<string, string>;
+}
+
+world standard-tool {
+    export tool;
+}
