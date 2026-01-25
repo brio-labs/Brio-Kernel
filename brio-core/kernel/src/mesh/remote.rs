@@ -15,6 +15,12 @@ pub struct RemoteRouter {
     clients: Arc<RwLock<HashMap<NodeId, MeshTransportClient<Channel>>>>,
 }
 
+impl Default for RemoteRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RemoteRouter {
     pub fn new() -> Self {
         Self {
