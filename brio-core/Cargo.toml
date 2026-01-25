@@ -4,8 +4,8 @@ members = ["kernel", "components/supervisor"]
 
 [workspace.dependencies]
 tokio = { version = "1.36", features = ["full"] }
-wasmtime = { version = "40.0.1" }
-wasmtime-wasi = { version = "40.0.1" }
+wasmtime = { version = "41.0.0" }
+wasmtime-wasi = { version = "41.0.0" }
 wasmtime-component-macro = { version = "34.0.2" }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
