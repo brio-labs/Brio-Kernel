@@ -51,6 +51,7 @@ async-trait = "0.1"
 prost = "0.14.3"
 tonic = "0.14.2"
 tonic-prost = "0.14.2"
+dunce = "1.0.5"
 
 # pprof uses Unix-specific APIs (pthread, signals) - only enable on Unix
 [target.'cfg(unix)'.dependencies]
@@ -60,6 +61,7 @@ pprof = { version = "0.15", features = ["flamegraph", "prost-codec"] }
 supervisor = { path = "../components/supervisor" }
 wiremock = "0.6"
 proptest = "1"
+tempfile = "3.24.0"
 
 
 [build-dependencies]

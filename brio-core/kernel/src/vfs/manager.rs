@@ -15,19 +15,23 @@ struct SessionInfo {
     base_snapshot_hash: String,
 }
 
+use crate::infrastructure::config::SandboxSettings;
+
 pub struct SessionManager {
     // Map SessionID -> SessionInfo
     sessions: HashMap<String, SessionInfo>,
     root_temp_dir: PathBuf,
+    sandbox: SandboxSettings,
 }
 
 impl SessionManager {
-    pub fn new() -> Self {
+    pub fn new(sandbox: SandboxSettings) -> Self {
         // Use standard temp dir or default to /tmp/brio
         let temp = std::env::temp_dir().join("brio");
         Self {
             sessions: HashMap::new(),
             root_temp_dir: temp,
+            sandbox,
         }
     }
 
@@ -95,31 +99,66 @@ impl SessionManager {
         }
     }
 
+    /// Validates that the given path is within one of the allowed sandbox roots.
+    fn validate_sandbox_path(&self, canonical_target: &Path) -> Result<(), String> {
+        if self.sandbox.allowed_paths.is_empty() {
+            return Ok(());
+        }
+
+        for allowed_path in &self.sandbox.allowed_paths {
+            let canonical_allowed = dunce::canonicalize(allowed_path).map_err(|e| {
+                format!(
+                    "Invalid allowed path configuration '{}': {}",
+                    allowed_path, e
+                )
+            })?;
+
+            if canonical_target.starts_with(&canonical_allowed) {
+                return Ok(());
+            }
+        }
+
+        Err(format!(
+            "Security Violation: Path '{:?}' is outside the authorized sandbox roots.",
+            canonical_target
+        ))
+    }
+
     /// Creates a new session by copying (reflink) the base directory.
     #[instrument(skip(self))]
     pub fn begin_session(&mut self, base_path: String) -> Result<String, String> {
-        let base = PathBuf::from(&base_path);
-        if !base.exists() {
+        // Security: Path Sandboxing
+        let canonical_base = dunce::canonicalize(&base_path)
+            .map_err(|e| format!("Invalid base path '{}': {}", base_path, e))?;
+
+        // 1. Check if path exists
+        if !canonical_base.exists() {
             return Err(format!("Base path does not exist: {}", base_path));
         }
+
+        // 2. Enforce Sandbox Limits (if configured)
+        self.validate_sandbox_path(&canonical_base)?;
 
         let session_id = Uuid::new_v4().to_string();
         let session_path = self.root_temp_dir.join(&session_id);
 
-        info!("Starting session {} for base {:?}", session_id, base);
+        info!(
+            "Starting session {} for base {:?}",
+            session_id, canonical_base
+        );
 
         // Compute snapshot hash before copying
-        let base_snapshot_hash = Self::compute_directory_hash(&base)?;
+        let base_snapshot_hash = Self::compute_directory_hash(&canonical_base)?;
 
         // Perform Reflink Copy
-        reflink::copy_dir_reflink(&base, &session_path)
+        reflink::copy_dir_reflink(&canonical_base, &session_path)
             .map_err(|e| format!("Failed to create session copy: {}", e))?;
 
         // Store session mapping with snapshot
         self.sessions.insert(
             session_id.clone(),
             SessionInfo {
-                base_path: base,
+                base_path: canonical_base,
                 base_snapshot_hash,
             },
         );
@@ -257,6 +296,6 @@ impl SessionManager {
 
 impl Default for SessionManager {
     fn default() -> Self {
-        Self::new()
+        Self::new(Default::default())
     }
 }
