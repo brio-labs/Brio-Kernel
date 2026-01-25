@@ -181,6 +181,12 @@ pub fn create_engine_config() -> Config {
     let mut config = Config::new();
     config.wasm_component_model(true);
     config.async_support(true);
+
+    // Security Hardening: Resource Limits
+    config.max_wasm_stack(8 * 1024 * 1024); // 8 MiB
+    config.async_stack_size(8 * 1024 * 1024); // 8 MiB
+    config.memory_reservation(4 * 1024 * 1024 * 1024); // 4 GiB static memory limits
+
     config
 }
 
