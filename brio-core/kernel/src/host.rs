@@ -24,7 +24,11 @@ pub struct BrioHostState {
 
 impl BrioHostState {
     /// Creates a new BrioHostState with a pre-configured provider registry.
-    pub async fn new(db_url: &str, registry: ProviderRegistry) -> Result<Self> {
+    pub async fn new(
+        db_url: &str,
+        registry: ProviderRegistry,
+        sandbox: crate::infrastructure::config::SandboxSettings,
+    ) -> Result<Self> {
         let pool = SqlitePoolOptions::new().connect(db_url).await?;
 
         Ok(Self {
@@ -32,7 +36,7 @@ impl BrioHostState {
             remote_router: None, // Default to standalone mode
             db_pool: pool,
             broadcaster: Broadcaster::new(),
-            session_manager: std::sync::Mutex::new(SessionManager::new()),
+            session_manager: std::sync::Mutex::new(SessionManager::new(sandbox)),
             provider_registry: Arc::new(registry),
         })
     }
@@ -42,6 +46,7 @@ impl BrioHostState {
         db_url: &str,
         registry: ProviderRegistry,
         _node_id: NodeId,
+        sandbox: crate::infrastructure::config::SandboxSettings,
     ) -> Result<Self> {
         let pool = SqlitePoolOptions::new().connect(db_url).await?;
         let remote_router = RemoteRouter::new();
@@ -51,7 +56,7 @@ impl BrioHostState {
             remote_router: Some(remote_router),
             db_pool: pool,
             broadcaster: Broadcaster::new(),
-            session_manager: std::sync::Mutex::new(SessionManager::new()),
+            session_manager: std::sync::Mutex::new(SessionManager::new(sandbox)),
             provider_registry: Arc::new(registry),
         })
     }
@@ -61,7 +66,7 @@ impl BrioHostState {
         let registry = ProviderRegistry::new();
         registry.register_arc("default", Arc::from(provider));
         registry.set_default("default");
-        Self::new(db_url, registry).await
+        Self::new(db_url, registry, Default::default()).await
     }
 
     pub fn register_component(&self, id: String, sender: Sender<MeshMessage>) {

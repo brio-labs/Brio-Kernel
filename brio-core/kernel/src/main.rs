@@ -68,7 +68,9 @@ async fn main() -> anyhow::Result<()> {
 
     let state = if let Some(ref id) = node_id {
         info!("Initializing in Distributed Mode (Node ID: {})", id);
-        match BrioHostState::new_distributed(db_url, registry, id.clone()).await {
+        match BrioHostState::new_distributed(db_url, registry, id.clone(), config.sandbox.clone())
+            .await
+        {
             Ok(s) => std::sync::Arc::new(s),
             Err(e) => {
                 error!("Failed to initialize distributed host state: {:?}", e);
@@ -77,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
         }
     } else {
         info!("Initializing in Standalone Mode");
-        match BrioHostState::new(db_url, registry).await {
+        match BrioHostState::new(db_url, registry, config.sandbox.clone()).await {
             Ok(s) => std::sync::Arc::new(s),
             Err(e) => {
                 error!("Failed to initialize host state: {:?}", e);
