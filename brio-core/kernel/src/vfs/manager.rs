@@ -1,12 +1,9 @@
-use super::{diff, reflink};
-use sha2::{Digest, Sha256};
+use super::{diff, hashing, policy::SandboxPolicy, reflink};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
-use walkdir::WalkDir;
 
 /// Represents a session with its base path and snapshot hash
 struct SessionInfo {
@@ -21,7 +18,7 @@ pub struct SessionManager {
     // Map SessionID -> SessionInfo
     sessions: HashMap<String, SessionInfo>,
     root_temp_dir: PathBuf,
-    sandbox: SandboxSettings,
+    policy: SandboxPolicy,
 }
 
 impl SessionManager {
@@ -31,46 +28,8 @@ impl SessionManager {
         Self {
             sessions: HashMap::new(),
             root_temp_dir: temp,
-            sandbox,
+            policy: SandboxPolicy::new(&sandbox),
         }
-    }
-
-    /// Computes a combined hash of all files in a directory for conflict detection.
-    fn compute_directory_hash(path: &Path) -> Result<String, String> {
-        let mut hasher = Sha256::new();
-        let mut count = 0;
-
-        for entry in WalkDir::new(path).sort_by_file_name() {
-            let entry = entry.map_err(|e| format!("Failed to walk directory: {}", e))?;
-            let file_path = entry.path();
-
-            if file_path.is_file() {
-                // Include relative path in hash to detect renames
-                let relative = file_path
-                    .strip_prefix(path)
-                    .map_err(|e| format!("Failed to strip prefix: {}", e))?;
-                hasher.update(relative.to_string_lossy().as_bytes());
-
-                // Include file content hash
-                let mut file = fs::File::open(file_path)
-                    .map_err(|e| format!("Failed to open file {:?}: {}", file_path, e))?;
-                let mut buffer = [0u8; 8192];
-                loop {
-                    let bytes_read = file
-                        .read(&mut buffer)
-                        .map_err(|e| format!("Failed to read file {:?}: {}", file_path, e))?;
-                    if bytes_read == 0 {
-                        break;
-                    }
-                    hasher.update(&buffer[..bytes_read]);
-                }
-                count += 1;
-            }
-        }
-
-        // Include file count to detect deletions
-        hasher.update(count.to_string().as_bytes());
-        Ok(hex::encode(hasher.finalize()))
     }
 
     /// Cleans up the temporary session directory.
@@ -99,35 +58,10 @@ impl SessionManager {
         }
     }
 
-    /// Validates that the given path is within one of the allowed sandbox roots.
-    fn validate_sandbox_path(&self, canonical_target: &Path) -> Result<(), String> {
-        if self.sandbox.allowed_paths.is_empty() {
-            return Ok(());
-        }
-
-        for allowed_path in &self.sandbox.allowed_paths {
-            let canonical_allowed = dunce::canonicalize(allowed_path).map_err(|e| {
-                format!(
-                    "Invalid allowed path configuration '{}': {}",
-                    allowed_path, e
-                )
-            })?;
-
-            if canonical_target.starts_with(&canonical_allowed) {
-                return Ok(());
-            }
-        }
-
-        Err(format!(
-            "Security Violation: Path '{:?}' is outside the authorized sandbox roots.",
-            canonical_target
-        ))
-    }
-
     /// Creates a new session by copying (reflink) the base directory.
     #[instrument(skip(self))]
     pub fn begin_session(&mut self, base_path: String) -> Result<String, String> {
-        // Security: Path Sandboxing
+        // Security: Path Sandboxing (Delegated to Policy)
         let canonical_base = dunce::canonicalize(&base_path)
             .map_err(|e| format!("Invalid base path '{}': {}", base_path, e))?;
 
@@ -136,8 +70,8 @@ impl SessionManager {
             return Err(format!("Base path does not exist: {}", base_path));
         }
 
-        // 2. Enforce Sandbox Limits (if configured)
-        self.validate_sandbox_path(&canonical_base)?;
+        // 2. Enforce Sandbox Limits (Delegated)
+        self.policy.validate_path(&canonical_base)?;
 
         let session_id = Uuid::new_v4().to_string();
         let session_path = self.root_temp_dir.join(&session_id);
@@ -147,8 +81,8 @@ impl SessionManager {
             session_id, canonical_base
         );
 
-        // Compute snapshot hash before copying
-        let base_snapshot_hash = Self::compute_directory_hash(&canonical_base)?;
+        // Compute snapshot hash before copying (Delegated to hashing)
+        let base_snapshot_hash = hashing::compute_directory_hash(&canonical_base)?;
 
         // Perform Reflink Copy
         reflink::copy_dir_reflink(&canonical_base, &session_path)
@@ -186,7 +120,7 @@ impl SessionManager {
         }
 
         // Conflict detection: re-hash base and compare
-        let current_hash = Self::compute_directory_hash(&base_path)?;
+        let current_hash = hashing::compute_directory_hash(&base_path)?;
         if current_hash != original_hash {
             warn!(
                 "Conflict detected for session {}: base directory has been modified",
