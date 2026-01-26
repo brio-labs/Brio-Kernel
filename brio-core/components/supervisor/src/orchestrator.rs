@@ -7,10 +7,12 @@
 //!
 //! Dependencies are injected via traits (DIP), enabling testability.
 
-use crate::domain::{AgentId, Priority, Task, TaskStatus};
-use crate::mesh_client::{AgentDispatcher, DispatchResult, MeshError};
+use crate::domain::{Task, TaskStatus};
+use crate::mesh_client::{AgentDispatcher, MeshError};
 use crate::repository::{RepositoryError, TaskRepository};
 use crate::selector::AgentSelector;
+
+use crate::handlers;
 
 // =============================================================================
 // Planner Trait
@@ -90,10 +92,10 @@ where
     P: Planner,
     S: AgentSelector,
 {
-    repository: R,
-    dispatcher: D,
-    planner: P,
-    selector: S,
+    pub(crate) repository: R,
+    pub(crate) dispatcher: D,
+    pub(crate) planner: P,
+    pub(crate) selector: S,
 }
 
 impl<R, D, P, S> Supervisor<R, D, P, S>
@@ -128,8 +130,15 @@ where
             .map_err(SupervisorError::RepositoryFailure)?;
         let mut processed_count: u32 = 0;
 
+        let ctx = handlers::SupervisorContext {
+            repository: &self.repository,
+            dispatcher: &self.dispatcher,
+            planner: &self.planner,
+            selector: &self.selector,
+        };
+
         for task in active_tasks {
-            match self.process_task(&task) {
+            match self.process_task_with_handlers(&ctx, &task) {
                 Ok(true) => processed_count += 1,
                 Ok(false) => { /* Task checked but no state transition occurred */ }
                 Err(e) => {
@@ -141,111 +150,22 @@ where
         Ok(processed_count)
     }
 
-    /// Processes a single task based on its current state.
-    fn process_task(&self, task: &Task) -> Result<bool, SupervisorError> {
+    fn process_task_with_handlers(
+        &self,
+        ctx: &handlers::SupervisorContext<R, D, P, S>,
+        task: &Task,
+    ) -> Result<bool, SupervisorError> {
+        use handlers::TaskStateHandler;
         match task.status() {
-            TaskStatus::Pending => {
-                self.repository
-                    .update_status(task.id(), TaskStatus::Planning)
-                    .map_err(SupervisorError::StatusUpdateFailure)?;
-                Ok(true)
-            }
-            TaskStatus::Planning => {
-                match self
-                    .planner
-                    .plan(task.content())
-                    .map_err(SupervisorError::PlanningFailure)?
-                {
-                    Some(subtasks) if !subtasks.is_empty() => {
-                        for sub_content in subtasks {
-                            self.repository
-                                .create_task(sub_content, Priority::DEFAULT, Some(task.id()))
-                                .map_err(SupervisorError::RepositoryFailure)?;
-                        }
-
-                        self.repository
-                            .update_status(task.id(), TaskStatus::Coordinating)
-                            .map_err(SupervisorError::StatusUpdateFailure)?;
-                    }
-                    _ => {
-                        self.repository
-                            .update_status(task.id(), TaskStatus::Executing)
-                            .map_err(SupervisorError::StatusUpdateFailure)?;
-                    }
-                }
-                Ok(true)
-            }
+            TaskStatus::Pending => handlers::pending::PendingHandler.handle(ctx, task),
+            TaskStatus::Planning => handlers::planning::PlanningHandler.handle(ctx, task),
+            TaskStatus::Executing => handlers::executing::ExecutingHandler.handle(ctx, task),
             TaskStatus::Coordinating => {
-                let subtasks = self
-                    .repository
-                    .fetch_subtasks(task.id())
-                    .map_err(SupervisorError::RepositoryFailure)?;
-
-                if subtasks.is_empty() {
-                    self.repository
-                        .update_status(task.id(), TaskStatus::Verifying)
-                        .map_err(SupervisorError::StatusUpdateFailure)?;
-                    return Ok(true);
-                }
-
-                if subtasks
-                    .iter()
-                    .any(|t| matches!(t.status(), TaskStatus::Failed))
-                {
-                    self.repository
-                        .mark_failed(task.id(), "Subtask failed")
-                        .map_err(SupervisorError::StatusUpdateFailure)?;
-                    return Ok(true);
-                }
-
-                if subtasks
-                    .iter()
-                    .all(|t| matches!(t.status(), TaskStatus::Completed))
-                {
-                    self.repository
-                        .update_status(task.id(), TaskStatus::Verifying)
-                        .map_err(SupervisorError::StatusUpdateFailure)?;
-                    return Ok(true);
-                }
-
-                Ok(false)
+                handlers::coordinating::CoordinatingHandler.handle(ctx, task)
             }
-            TaskStatus::Executing => {
-                if task.assigned_agent().is_some() {
-                    return Ok(false);
-                }
-
-                let agent = self.select_agent(task);
-                match self.dispatcher.dispatch(&agent, task)? {
-                    DispatchResult::Accepted => {
-                        self.repository
-                            .assign_agent(task.id(), &agent)
-                            .map_err(SupervisorError::StatusUpdateFailure)?;
-                        Ok(true)
-                    }
-                    DispatchResult::Completed(_) => {
-                        self.repository
-                            .mark_completed(task.id())
-                            .map_err(SupervisorError::StatusUpdateFailure)?;
-                        Ok(true)
-                    }
-                    DispatchResult::AgentBusy => Ok(false),
-                }
-            }
-            TaskStatus::Verifying => {
-                self.repository
-                    .mark_completed(task.id())
-                    .map_err(SupervisorError::StatusUpdateFailure)?;
-                Ok(true)
-            }
-            _ => Ok(false), // Ignore other states
+            TaskStatus::Verifying => handlers::verifying::VerifyingHandler.handle(ctx, task),
+            _ => Ok(false),
         }
-    }
-
-    /// Selects an appropriate agent based on task content and capabilities.
-    /// Selects an appropriate agent based on task content and capabilities.
-    fn select_agent(&self, task: &Task) -> AgentId {
-        self.selector.select(task)
     }
 
     /// Handles failures during task dispatch.
@@ -263,7 +183,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Priority, TaskId, TaskStatus};
+    use crate::domain::{AgentId, Priority, TaskId, TaskStatus};
+    use crate::mesh_client::{DispatchResult, MeshError};
     use crate::selector::KeywordAgentSelector;
     use std::cell::RefCell;
     use std::collections::HashSet;
@@ -484,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn poll_dispatches_pending_tasks() {
+    fn poll_dispatches_pending_tasks() -> Result<(), SupervisorError> {
         let repo = MockRepository::new(vec![test_task(1, "task1"), test_task(2, "task2")]);
         let planner = MockPlanner;
         let dispatcher = MockDispatcher {
@@ -493,14 +414,15 @@ mod tests {
         let selector = KeywordAgentSelector;
 
         let supervisor = Supervisor::new(repo, dispatcher, planner, selector);
-        let count = supervisor.poll_tasks().unwrap();
+        let count = supervisor.poll_tasks()?;
 
         // Pending -> Planning (2 tasks processed)
         assert_eq!(count, 2);
+        Ok(())
     }
 
     #[test]
-    fn poll_executing_tasks_logic() {
+    fn poll_executing_tasks_logic() -> Result<(), SupervisorError> {
         // Test transition from Executing -> Assigned
         let task = Task::new(
             TaskId::new(3),
@@ -519,14 +441,15 @@ mod tests {
         let selector = KeywordAgentSelector;
 
         let supervisor = Supervisor::new(repo, dispatcher, planner, selector);
-        let count = supervisor.poll_tasks().unwrap();
+        let count = supervisor.poll_tasks()?;
 
         // 1 active task processed (dispatched and assigned)
         assert_eq!(count, 1);
+        Ok(())
     }
 
     #[test]
-    fn poll_executing_tasks_already_assigned() {
+    fn poll_executing_tasks_already_assigned() -> Result<(), SupervisorError> {
         // If already assigned, should not re-dispatch
         let mut task = Task::new(
             TaskId::new(3),
@@ -556,14 +479,15 @@ mod tests {
         let selector = KeywordAgentSelector;
 
         let supervisor = Supervisor::new(repo, dispatcher, planner, selector);
-        let count = supervisor.poll_tasks().unwrap();
+        let count = supervisor.poll_tasks()?;
 
         // No processing/changes (count = 0)
         assert_eq!(count, 0);
+        Ok(())
     }
 
     #[test]
-    fn poll_marks_assigned_on_accept() {
+    fn poll_marks_assigned_on_accept() -> Result<(), SupervisorError> {
         // Need to be in Executing state to dispatch
         let task = Task::new(
             TaskId::new(42),
@@ -584,11 +508,12 @@ mod tests {
         let selector = KeywordAgentSelector;
 
         let supervisor = Supervisor::new(repo, dispatcher, planner, selector);
-        supervisor.poll_tasks().unwrap();
+        supervisor.poll_tasks()?;
 
         let assigned = repo_clone.assigned();
         assert_eq!(assigned.len(), 1);
         assert_eq!(assigned[0].0.inner(), 42);
+        Ok(())
     }
 
     struct DecomposingPlanner {
@@ -602,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn test_task_decomposition_flow() {
+    fn test_task_decomposition_flow() -> Result<(), SupervisorError> {
         // Setup: 1 pending task, Planner returns 2 subtasks
         let root_task = Task::new(
             TaskId::new(1),
@@ -625,40 +550,39 @@ mod tests {
         let supervisor = Supervisor::new(repo.clone(), dispatcher, planner, selector);
 
         // 1. Poll: Pending -> Planning
-        let count = supervisor.poll_tasks().unwrap();
+        let count = supervisor.poll_tasks()?;
         assert_eq!(count, 1);
-        let t1 = repo.get_task(TaskId::new(1)).unwrap();
+        let t1 = repo.get_task(TaskId::new(1)).expect("Task 1 should exist");
         assert_eq!(t1.status(), TaskStatus::Planning);
 
         // 2. Poll: Planning -> Coordinating + Subtasks Created
-        let count = supervisor.poll_tasks().unwrap();
+        let count = supervisor.poll_tasks()?;
         assert_eq!(count, 1);
-        let t1 = repo.get_task(TaskId::new(1)).unwrap();
+        let t1 = repo.get_task(TaskId::new(1)).expect("Task 1 should exist");
         assert_eq!(t1.status(), TaskStatus::Coordinating);
 
         // Verify subtasks created
-        let subtasks = repo.fetch_subtasks(TaskId::new(1)).unwrap();
+        let subtasks = repo.fetch_subtasks(TaskId::new(1))?;
         assert_eq!(subtasks.len(), 2);
         assert_eq!(subtasks[0].content(), "Get Plans");
         assert_eq!(subtasks[0].status(), TaskStatus::Pending);
 
         // 3. Poll: Coordinating -> checks subtasks (all Pending/Executing) -> Stays Coordinating
 
-        let count = supervisor.poll_tasks().unwrap();
+        let count = supervisor.poll_tasks()?;
         assert_eq!(count, 2);
 
         // 4. Manually complete subtasks to test completion flow
-        repo.update_status(TaskId::new(2), TaskStatus::Completed)
-            .unwrap();
-        repo.update_status(TaskId::new(3), TaskStatus::Completed)
-            .unwrap();
+        repo.update_status(TaskId::new(2), TaskStatus::Completed)?;
+        repo.update_status(TaskId::new(3), TaskStatus::Completed)?;
 
         // 5. Poll: Root checks logic.
-        let count = supervisor.poll_tasks().unwrap();
+        let count = supervisor.poll_tasks()?;
         assert_eq!(count, 1);
 
-        let t1 = repo.get_task(TaskId::new(1)).unwrap();
+        let t1 = repo.get_task(TaskId::new(1)).expect("Task 1 should exist");
         assert_eq!(t1.status(), TaskStatus::Verifying);
+        Ok(())
     }
 
     #[test]
@@ -681,7 +605,7 @@ mod tests {
         let selector = KeywordAgentSelector;
 
         let supervisor = Supervisor::new(repo, dispatcher, planner, selector);
-        let agent_id = supervisor.select_agent(&task);
+        let agent_id = supervisor.selector.select(&task);
 
         assert_eq!(agent_id.as_str(), "agent_reviewer");
     }

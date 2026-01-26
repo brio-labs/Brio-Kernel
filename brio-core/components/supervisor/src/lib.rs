@@ -8,6 +8,7 @@
 //! This component is built as a WASI Preview 2 module.
 
 pub mod domain;
+pub mod handlers;
 pub mod mesh_client;
 pub mod orchestrator;
 pub mod planner;
