@@ -11,6 +11,7 @@ world brio-host {
     import brio:ai/inference;
     import logging;
     import planner;
+    import pub-sub;
 }
 
 interface agent-runner {
@@ -26,4 +27,5 @@ interface agent-runner {
 world smart-agent {
     include brio-host;
     export agent-runner;
+    export event-handler;
 }

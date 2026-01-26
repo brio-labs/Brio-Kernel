@@ -90,6 +90,83 @@ impl brio::core::session_fs::Host for BrioHostState {
     }
 }
 
+impl brio::core::pub_sub::Host for BrioHostState {
+    fn subscribe(&mut self, topic: String) -> Result<(), String> {
+        // Enforce: only plugins can subscribe
+        let plugin_id = self
+            .current_plugin_id()
+            .ok_or_else(|| "Only plugins can subscribe to events".to_string())?
+            .to_string();
+
+        self.event_bus().subscribe(topic, plugin_id);
+        Ok(())
+    }
+
+    fn publish(&mut self, topic: String, data: brio::core::pub_sub::Payload) -> Result<(), String> {
+        // Enforce: anyone can publish? Or strict permissions?
+        // Let's enforce "mesh:send" for now.
+        // self.check_permission("mesh:send")?; // Optional
+
+        let subscribers = self.event_bus().subscribers(&topic);
+        if subscribers.is_empty() {
+            return Ok(());
+        }
+
+        let state = self.clone();
+
+        let payload_enum = match data {
+            brio::core::pub_sub::Payload::Json(s) => crate::engine::runner::EventPayload::Json(s),
+            brio::core::pub_sub::Payload::Binary(b) => {
+                crate::engine::runner::EventPayload::Binary(b)
+            }
+        };
+
+        // Spawn logic
+        tokio::spawn(async move {
+            if let Some(registry) = state.plugin_registry() {
+                let engine = registry.engine();
+                let runner = crate::engine::runner::AgentRunner::new(engine.clone());
+
+                for agent_id in subscribers {
+                    if let Some(metadata) = registry.get(&agent_id) {
+                        // We need to clone payload for each agent?
+                        // Payload enum variants own the data.
+                        // We can clone the enum.
+                        let payload_clone = match &payload_enum {
+                            crate::engine::runner::EventPayload::Json(s) => {
+                                crate::engine::runner::EventPayload::Json(s.clone())
+                            }
+                            crate::engine::runner::EventPayload::Binary(b) => {
+                                crate::engine::runner::EventPayload::Binary(b.clone())
+                            }
+                        };
+
+                        // Run
+                        if let Err(e) = runner
+                            .run_event_handler(
+                                &metadata.path,
+                                state.clone(),
+                                topic.clone(),
+                                payload_clone,
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                "Failed to deliver event '{}' to agent '{}': {}",
+                                topic,
+                                agent_id,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+}
+
 impl brio::core::inference::Host for BrioHostState {
     fn chat(
         &mut self,
@@ -208,6 +285,7 @@ fn register_host_interfaces(linker: &mut Linker<BrioHostState>) -> Result<()> {
     brio::core::session_fs::add_to_linker::<BrioHostState, State>(linker, |s| s)?;
     brio::core::inference::add_to_linker::<BrioHostState, State>(linker, |s| s)?;
     brio::core::logging::add_to_linker::<BrioHostState, State>(linker, |s| s)?;
+    brio::core::pub_sub::add_to_linker::<BrioHostState, State>(linker, |s| s)?;
 
     Ok(())
 }

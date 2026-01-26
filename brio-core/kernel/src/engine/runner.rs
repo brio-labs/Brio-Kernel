@@ -18,10 +18,19 @@ wasmtime::component::bindgen!({
             run: func(context: task-context) -> result<string, string>;
         }
 
+        interface event-handler {
+            variant payload {
+                json(string),
+                binary(list<u8>)
+            }
+            handle-event: func(topic: string, data: payload);
+        }
+
         world smart-agent {
             import agent-runner; // Wait. To CALL it, the Guest EXPORTS it.
             // But from Host perspective, we instantiate a component that exports it.
             export agent-runner; 
+            export event-handler; 
         }
     "#,
     world: "smart-agent",
@@ -30,6 +39,7 @@ wasmtime::component::bindgen!({
 
 pub type SmartAgentInstance = SmartAgent;
 pub use exports::brio::core::agent_runner::TaskContext;
+pub use exports::brio::core::event_handler::Payload as EventPayload;
 
 pub struct AgentRunner {
     engine: Engine,
@@ -64,5 +74,27 @@ impl AgentRunner {
             .call_run(&mut store, &context)?;
 
         result.map_err(|e| anyhow::anyhow!("Agent execution failed: {}", e))
+    }
+
+    pub async fn run_event_handler(
+        &self,
+        component_path: &std::path::Path,
+        host_state: BrioHostState,
+        topic: String,
+        payload: exports::brio::core::event_handler::Payload,
+    ) -> Result<()> {
+        let component = Component::from_file(&self.engine, component_path)
+            .context("Failed to load component")?;
+
+        let linker = crate::engine::linker::create_linker(&self.engine)?;
+        let mut store = Store::new(&self.engine, host_state);
+
+        let agent = SmartAgent::instantiate_async(&mut store, &component, &linker).await?;
+
+        agent
+            .brio_core_event_handler()
+            .call_handle_event(&mut store, &topic, &payload)?;
+
+        Ok(())
     }
 }

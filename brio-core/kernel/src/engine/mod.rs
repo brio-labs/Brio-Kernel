@@ -45,12 +45,19 @@ wasmtime::component::bindgen!({
             log: func(level: level, context: string, message: string);
         }
 
+        interface pub-sub {
+             use service-mesh.{payload};
+             subscribe: func(topic: string) -> result<tuple<>, string>;
+             publish: func(topic: string, data: payload) -> result<tuple<>, string>;
+        }
+
         world brio-host {
             import service-mesh;
             import sql-state;
             import session-fs;
             import inference;
             import logging;
+            import pub-sub;
         }
     "#,
 });

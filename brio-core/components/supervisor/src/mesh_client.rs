@@ -73,21 +73,23 @@ pub trait AgentDispatcher {
 // =============================================================================
 
 /// Payload sent to an agent for task execution.
+/// Payload sent to an agent for task execution (Matches agent-runner TaskContext).
 #[derive(Debug)]
-struct TaskDispatchRequest {
-    task_id: u64,
-    content: String,
-    priority: u8,
+struct TaskContextDto {
+    task_id: String,
+    description: String,
+    input_files: Vec<String>,
 }
 
-impl TaskDispatchRequest {
+impl TaskContextDto {
     fn to_json(&self) -> Result<String, MeshError> {
-        // Manual JSON construction to avoid serde dependency in core
+        // formatting manually to avoid serde dependency
+        let files_json = "[]"; // empty for now
         Ok(format!(
-            r#"{{"task_id":{},"content":"{}","priority":{}}}"#,
+            r#"{{"task-id":"{}","description":"{}","input-files":{}}}"#,
             self.task_id,
-            self.content.replace('\\', "\\\\").replace('"', "\\\""),
-            self.priority
+            self.description.replace('\\', "\\\\").replace('"', "\\\""),
+            files_json
         ))
     }
 }
@@ -115,23 +117,20 @@ impl Default for WitAgentDispatcher {
 
 impl AgentDispatcher for WitAgentDispatcher {
     fn dispatch(&self, agent: &AgentId, task: &Task) -> Result<DispatchResult, MeshError> {
-        // Construct standard TaskContext payload
-        let payload_json = format!(
-            r#"{{"task_id":"{}","description":"{}","input_files":[]}}"#,
-            task.id().to_string(),
-            task.content().replace('\\', "\\\\").replace('"', "\\\"")
-        );
+        let context = TaskContextDto {
+            task_id: task.id().to_string(),
+            description: task.content().to_string(),
+            input_files: vec![],
+        };
+
+        let payload_json = context.to_json()?;
         let payload = wit_bindings::service_mesh::Payload::Json(payload_json);
 
-        // Call the "run" method on the agent (routed by Kernel)
         let response = wit_bindings::service_mesh::call(agent.as_str(), "run", payload)
             .map_err(MeshError::TransportError)?;
 
         match response {
             wit_bindings::service_mesh::Payload::Json(result) => {
-                // Determine result. Since "run" returns a summary string on success, we assume completion.
-                // In future, if async, we might get "Accepted" message.
-                // For Phase 3, we assume synchronous completion for simplicy.
                 Ok(DispatchResult::Completed(result))
             }
             wit_bindings::service_mesh::Payload::Binary(_) => Err(MeshError::SerializationError(

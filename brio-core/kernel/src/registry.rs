@@ -88,14 +88,15 @@ impl PluginRegistry {
             .ok_or_else(|| anyhow::anyhow!("Plugin not found: {}", plugin_id))?;
 
         let component = Component::from_file(&self.engine, &metadata.path)
-            .context("Failed to load component from file")?;
+            .context("Failed to load component")?;
 
         let linker = create_linker(&self.engine)?;
 
-        // Apply plugin permissions to the host state
-        let host_state = host_state.with_permissions(metadata.permissions.clone());
+        // Create a view of host state with plugin context
+        let plugin_state =
+            host_state.with_plugin_context(plugin_id.to_string(), metadata.permissions.clone());
 
-        let mut store = Store::new(&self.engine, host_state);
+        let mut store = Store::new(&self.engine, plugin_state);
 
         let _ = linker.instantiate_async(&mut store, &component).await?;
 

@@ -6,6 +6,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 
 use crate::inference::{LLMProvider, ProviderRegistry};
+use crate::mesh::events::EventBus;
 use crate::mesh::remote::RemoteRouter;
 use crate::mesh::types::{NodeId, NodeInfo};
 use crate::mesh::{MeshMessage, Payload};
@@ -24,6 +25,8 @@ pub struct BrioHostState {
     provider_registry: Arc<ProviderRegistry>,
     permissions: Arc<std::collections::HashSet<String>>,
     plugin_registry: Option<Arc<PluginRegistry>>,
+    event_bus: Arc<EventBus>,
+    current_plugin_id: Option<String>,
 }
 
 impl BrioHostState {
@@ -45,6 +48,8 @@ impl BrioHostState {
             provider_registry: Arc::new(registry),
             permissions: Arc::new(std::collections::HashSet::new()),
             plugin_registry,
+            event_bus: Arc::new(EventBus::new()),
+            current_plugin_id: None,
         })
     }
 
@@ -68,6 +73,8 @@ impl BrioHostState {
             provider_registry: Arc::new(registry),
             permissions: Arc::new(std::collections::HashSet::new()),
             plugin_registry,
+            event_bus: Arc::new(EventBus::new()),
+            current_plugin_id: None,
         })
     }
 
@@ -202,10 +209,11 @@ impl BrioHostState {
         self.provider_registry.get_default()
     }
 
-    /// Creates a new view of the host state with restricted permissions.
-    pub fn with_permissions(&self, permissions: Vec<String>) -> Self {
+    /// Creates a new view of the host state with restricted permissions and plugin context.
+    pub fn with_plugin_context(&self, plugin_id: String, permissions: Vec<String>) -> Self {
         let mut new_state = self.clone();
         new_state.permissions = Arc::new(permissions.into_iter().collect());
+        new_state.current_plugin_id = Some(plugin_id);
         new_state
     }
 
@@ -219,5 +227,17 @@ impl BrioHostState {
         } else {
             Err(format!("Permission denied: required '{}'", permission))
         }
+    }
+
+    pub fn event_bus(&self) -> &EventBus {
+        &self.event_bus
+    }
+
+    pub fn current_plugin_id(&self) -> Option<&str> {
+        self.current_plugin_id.as_deref()
+    }
+
+    pub fn plugin_registry(&self) -> Option<Arc<PluginRegistry>> {
+        self.plugin_registry.clone()
     }
 }
