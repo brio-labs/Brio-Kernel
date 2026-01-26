@@ -42,7 +42,7 @@ impl exports::brio::core::event_handler::Guest for Component {
             // Strategic Logic (Simulated for Prototype)
             // In a real system, this would call `brio::core::inference::chat(...)`
 
-            let milestones = vec![
+            let milestones = [
                 "Phase 1: Setup Workspace",
                 "Phase 2: Implement Core Login",
                 "Phase 3: Verify Implementation",
