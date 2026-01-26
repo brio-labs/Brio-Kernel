@@ -110,10 +110,10 @@ impl TaskRepository for TestTaskRepository {
 
                 rows.into_iter()
                     .map(|r| {
-                        let id: i64 = r.try_get("id").unwrap();
-                        let content: String = r.try_get("content").unwrap();
-                        let priority: i64 = r.try_get("priority").unwrap();
-                        let status_str: String = r.try_get("status").unwrap();
+                        let id: i64 = r.try_get("id").map_err(|e| RepositoryError::SqlError(e.to_string()))?;
+                        let content: String = r.try_get("content").map_err(|e| RepositoryError::SqlError(e.to_string()))?;
+                        let priority: i64 = r.try_get("priority").map_err(|e| RepositoryError::SqlError(e.to_string()))?;
+                        let status_str: String = r.try_get("status").map_err(|e| RepositoryError::SqlError(e.to_string()))?;
                         let status = TaskStatus::parse(&status_str).map_err(|e| RepositoryError::ParseError(e.to_string()))?;
 
                         let assigned_agent_str: Option<String> = r.try_get("assigned_agent").unwrap_or(None);
@@ -242,10 +242,18 @@ impl TaskRepository for TestTaskRepository {
 
                 rows.into_iter()
                     .map(|r| {
-                        let id: i64 = r.try_get("id").unwrap();
-                        let content: String = r.try_get("content").unwrap();
-                        let priority: i64 = r.try_get("priority").unwrap();
-                        let status_str: String = r.try_get("status").unwrap();
+                        let id: i64 = r
+                            .try_get("id")
+                            .map_err(|e| RepositoryError::SqlError(e.to_string()))?;
+                        let content: String = r
+                            .try_get("content")
+                            .map_err(|e| RepositoryError::SqlError(e.to_string()))?;
+                        let priority: i64 = r
+                            .try_get("priority")
+                            .map_err(|e| RepositoryError::SqlError(e.to_string()))?;
+                        let status_str: String = r
+                            .try_get("status")
+                            .map_err(|e| RepositoryError::SqlError(e.to_string()))?;
                         let status = TaskStatus::parse(&status_str)
                             .map_err(|e| RepositoryError::ParseError(e.to_string()))?;
 
@@ -306,7 +314,7 @@ async fn manifesto_scenario_agent_fixing_bug() -> Result<()> {
     std::fs::write(&project_file, "bug")?;
 
     env.register_agent("agent_coder").await;
-    let agent_rx = env.agent_msg_rx.take().unwrap();
+    let agent_rx = env.agent_msg_rx.take().expect("Agent receiver missing");
     let agent_host = env.host.clone();
     let project_path = env.root.to_string_lossy().to_string();
 
@@ -354,7 +362,7 @@ async fn run_supervisor_cycle(host: Arc<BrioHostState>) -> Result<u32> {
         let supervisor = Supervisor::new(repo, dispatcher, planner, selector);
         let mut total = 0;
         loop {
-            let n = supervisor.poll_tasks().unwrap();
+            let n = supervisor.poll_tasks().expect("Supervisor poll failed");
             if n == 0 {
                 break;
             }
@@ -379,12 +387,14 @@ async fn smart_agent_logic(
     while let Some(msg) = rx.recv().await {
         if msg.method == "fix" {
             // 1. Begin Session (Sandboxed)
-            let session_id = host.begin_session(path.clone()).unwrap();
+            let session_id = host
+                .begin_session(path.clone())
+                .expect("Failed to begin session");
             let session_path = std::env::temp_dir().join("brio").join(&session_id);
             let file_path = session_path.join("dummy_bug.txt");
 
             // 2. Read Bug
-            let content = std::fs::read_to_string(&file_path).unwrap();
+            let content = std::fs::read_to_string(&file_path).expect("Failed to read bug file");
 
             // 3. Consult LLM (The "Smart" part)
             let prompt = format!(
@@ -417,10 +427,11 @@ async fn smart_agent_logic(
             let fixed_content = response.content.trim(); // Trim potential whitespace
 
             // 4. Apply Fix
-            std::fs::write(&file_path, fixed_content).unwrap();
+            std::fs::write(&file_path, fixed_content).expect("Failed to write fix");
 
             // 5. Commit
-            host.commit_session(session_id).unwrap();
+            host.commit_session(session_id)
+                .expect("Failed to commit session");
             let _ = msg
                 .reply_tx
                 .send(Ok(Payload::Json(fixed_content.to_string())));
@@ -431,10 +442,14 @@ async fn smart_agent_logic(
 async fn agent_logic(host: Arc<BrioHostState>, mut rx: mpsc::Receiver<MeshMessage>, path: String) {
     while let Some(msg) = rx.recv().await {
         if msg.method == "fix" {
-            let session = host.begin_session(path.clone()).unwrap();
+            let session = host
+                .begin_session(path.clone())
+                .expect("Failed to begin session");
             let session_path = std::env::temp_dir().join("brio").join(&session);
-            std::fs::write(session_path.join("dummy_bug.txt"), "fixed").unwrap();
-            host.commit_session(session).unwrap();
+            std::fs::write(session_path.join("dummy_bug.txt"), "fixed")
+                .expect("Failed to write fix");
+            host.commit_session(session)
+                .expect("Failed to commit session");
             let _ = msg.reply_tx.send(Ok(Payload::Json("fixed".into())));
         }
     }
@@ -469,7 +484,7 @@ async fn manifesto_scenario_real_ai() -> Result<()> {
     std::fs::write(&project_file, "bug")?;
 
     env.register_agent("agent_coder").await;
-    let agent_rx = env.agent_msg_rx.take().unwrap();
+    let agent_rx = env.agent_msg_rx.take().expect("Agent receiver missing");
     let agent_host = env.host.clone();
     let project_path = env.root.to_string_lossy().to_string();
 
