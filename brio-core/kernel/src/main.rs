@@ -1,3 +1,4 @@
+use anyhow::Context;
 use brio_kernel::host::BrioHostState;
 use brio_kernel::infrastructure::{audit, config::Settings, server, telemetry::TelemetryBuilder};
 use secrecy::ExposeSecret;
@@ -6,7 +7,7 @@ use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = Settings::new().expect("Failed to load configuration");
+    let config = Settings::new().context("Failed to load configuration")?;
 
     let mut telemetry_builder = TelemetryBuilder::new("brio-kernel", "0.1.0")
         .with_log_level("debug")
@@ -21,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
     telemetry_builder
         .with_metrics()
         .init()
-        .expect("Failed to initialize telemetry");
+        .context("Failed to initialize telemetry")?;
 
     info!("Brio Kernel Starting...");
     audit::log_audit(audit::AuditEvent::SystemStartup {
@@ -30,7 +31,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize Wasmtime Engine
     let engine_config = brio_kernel::engine::linker::create_engine_config();
-    let engine = wasmtime::Engine::new(&engine_config).expect("Failed to create Wasmtime engine");
+    let engine =
+        wasmtime::Engine::new(&engine_config).context("Failed to create Wasmtime engine")?;
 
     // Initialize Plugin Registry
     let mut plugin_registry = brio_kernel::registry::PluginRegistry::new(engine);
@@ -65,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
 
     let provider_config = brio_kernel::inference::OpenAIConfig::new(
         openai_key,
-        reqwest::Url::parse(&openai_base).expect("Invalid OpenAI Base URL"),
+        reqwest::Url::parse(&openai_base).context("Invalid OpenAI Base URL")?,
     );
     let provider = brio_kernel::inference::OpenAIProvider::new(provider_config);
 
@@ -88,37 +90,29 @@ async fn main() -> anyhow::Result<()> {
 
     let state = if let Some(ref id) = node_id {
         info!("Initializing in Distributed Mode (Node ID: {})", id);
-        match BrioHostState::new_distributed(
-            db_url,
-            registry,
-            Some(plugin_registry.clone()),
-            id.clone(),
-            config.sandbox.clone(),
+        std::sync::Arc::new(
+            BrioHostState::new_distributed(
+                db_url,
+                registry,
+                Some(plugin_registry.clone()),
+                id.clone(),
+                config.sandbox.clone(),
+            )
+            .await
+            .context("Failed to initialize distributed host state")?,
         )
-        .await
-        {
-            Ok(s) => std::sync::Arc::new(s),
-            Err(e) => {
-                error!("Failed to initialize distributed host state: {:?}", e);
-                std::process::exit(1);
-            }
-        }
     } else {
         info!("Initializing in Standalone Mode");
-        match BrioHostState::new(
-            db_url,
-            registry,
-            Some(plugin_registry.clone()),
-            config.sandbox.clone(),
+        std::sync::Arc::new(
+            BrioHostState::new(
+                db_url,
+                registry,
+                Some(plugin_registry.clone()),
+                config.sandbox.clone(),
+            )
+            .await
+            .context("Failed to initialize host state")?,
         )
-        .await
-        {
-            Ok(s) => std::sync::Arc::new(s),
-            Err(e) => {
-                error!("Failed to initialize host state: {:?}", e);
-                std::process::exit(1);
-            }
-        }
     };
 
     // Start gRPC server if distributed
@@ -126,9 +120,14 @@ async fn main() -> anyhow::Result<()> {
         let state_clone = state.clone();
         let port = mesh_port.clone();
         tokio::spawn(async move {
-            let addr = format!("0.0.0.0:{}", port)
-                .parse()
-                .expect("Invalid mesh address");
+            let addr_str = format!("0.0.0.0:{}", port);
+            let addr = match addr_str.parse() {
+                Ok(a) => a,
+                Err(e) => {
+                    error!("Invalid mesh address '{}': {}", addr_str, e);
+                    return;
+                }
+            };
             let service = brio_kernel::mesh::service::MeshService::new(state_clone, id);
 
             info!("Mesh gRPC server listening on {}", addr);
@@ -170,17 +169,23 @@ async fn main() -> anyhow::Result<()> {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(e) = signal::ctrl_c().await {
+            error!("failed to install Ctrl+C handler: {}", e);
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                error!("failed to install signal handler: {}", e);
+                // Hang instead of panicking to avoid crashing if signal handler fails
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(not(unix))]
