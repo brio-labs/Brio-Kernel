@@ -108,14 +108,31 @@ impl OpenAIProvider {
         &self,
         provider_req: &OpenAIChatRequest,
     ) -> Result<ChatResponse, (InferenceError, bool)> {
-        let url = self.config.base_url.join("chat/completions").map_err(|e| {
+        let request = self
+            .build_api_request(provider_req)
+            .map_err(|e| (e, false))?;
+
+        let res = request.send().await.map_err(|e| {
             (
-                InferenceError::ConfigError(format!("Invalid URL join: {}", e)),
-                false, // Don't retry config errors
+                InferenceError::NetworkError(e.to_string()),
+                true, // Retry network errors
             )
         })?;
 
-        let res = self
+        self.map_api_response(res).await
+    }
+
+    fn build_api_request(
+        &self,
+        provider_req: &OpenAIChatRequest,
+    ) -> Result<reqwest::RequestBuilder, InferenceError> {
+        let url = self
+            .config
+            .base_url
+            .join("chat/completions")
+            .map_err(|e| InferenceError::ConfigError(format!("Invalid URL join: {}", e)))?;
+
+        Ok(self
             .client
             .post(url)
             .header(
@@ -123,22 +140,19 @@ impl OpenAIProvider {
                 format!("Bearer {}", self.config.api_key.expose_secret()),
             )
             .header("Content-Type", "application/json")
-            .json(provider_req)
-            .send()
-            .await
-            .map_err(|e| {
-                (
-                    InferenceError::NetworkError(e.to_string()),
-                    true, // Retry network errors
-                )
-            })?;
+            .json(provider_req))
+    }
 
+    async fn map_api_response(
+        &self,
+        res: reqwest::Response,
+    ) -> Result<ChatResponse, (InferenceError, bool)> {
         match res.status() {
             StatusCode::OK => {
                 let body: OpenAIChatResponse = res.json().await.map_err(|e| {
                     (
                         InferenceError::ProviderError(format!("Parse error: {}", e)),
-                        false, // Don't retry parse errors
+                        false,
                     )
                 })?;
 
@@ -158,9 +172,7 @@ impl OpenAIProvider {
                     }),
                 })
             }
-            StatusCode::TOO_MANY_REQUESTS => {
-                Err((InferenceError::RateLimit, true)) // Retry rate limits
-            }
+            StatusCode::TOO_MANY_REQUESTS => Err((InferenceError::RateLimit, true)),
             StatusCode::BAD_REQUEST => {
                 let text = res.text().await.unwrap_or_default();
                 if text.contains("context_length_exceeded") {
@@ -180,7 +192,7 @@ impl OpenAIProvider {
                 let text = res.text().await.unwrap_or_default();
                 Err((
                     InferenceError::ProviderError(format!("HTTP {}: {}", status, text)),
-                    true, // Retry server errors
+                    true,
                 ))
             }
             _ => {
@@ -188,7 +200,7 @@ impl OpenAIProvider {
                 let text = res.text().await.unwrap_or_default();
                 Err((
                     InferenceError::ProviderError(format!("HTTP {}: {}", status, text)),
-                    false, // Don't retry other errors
+                    false,
                 ))
             }
         }
@@ -254,52 +266,56 @@ mod tests {
     use secrecy::SecretString;
 
     #[test]
-    fn test_openai_config_creation() {
+    fn test_openai_config_creation() -> anyhow::Result<()> {
         let api_key = SecretString::new("test-key".into());
-        let base_url = Url::parse("https://api.openai.com/v1/").unwrap();
+        let base_url = Url::parse("https://api.openai.com/v1/")?;
         let config = OpenAIConfig::new(api_key, base_url.clone());
         assert_eq!(config.base_url, base_url);
         assert!(config.max_retries.is_none());
         assert!(config.base_delay_ms.is_none());
+        Ok(())
     }
 
     #[test]
-    fn test_openai_config_with_retries() {
+    fn test_openai_config_with_retries() -> anyhow::Result<()> {
         let api_key = SecretString::new("test-key".into());
-        let base_url = Url::parse("https://api.openai.com/v1/").unwrap();
+        let base_url = Url::parse("https://api.openai.com/v1/")?;
         let config = OpenAIConfig::new(api_key, base_url)
             .with_max_retries(5)
             .with_base_delay_ms(500);
         assert_eq!(config.max_retries, Some(5));
         assert_eq!(config.base_delay_ms, Some(500));
+        Ok(())
     }
 
     #[test]
-    fn test_openai_provider_new() {
+    fn test_openai_provider_new() -> anyhow::Result<()> {
         let api_key = SecretString::new("test-key".into());
-        let base_url = Url::parse("https://api.openai.com/v1/").unwrap();
+        let base_url = Url::parse("https://api.openai.com/v1/")?;
         let config = OpenAIConfig::new(api_key, base_url);
         let provider = OpenAIProvider::new(config);
         assert_eq!(provider.max_retries, DEFAULT_MAX_RETRIES);
         assert_eq!(provider.base_delay_ms, DEFAULT_BASE_DELAY_MS);
+        Ok(())
     }
 
     #[test]
-    fn test_openai_provider_with_custom_retries() {
+    fn test_openai_provider_with_custom_retries() -> anyhow::Result<()> {
         let api_key = SecretString::new("test-key".into());
-        let base_url = Url::parse("https://api.openai.com/v1/").unwrap();
+        let base_url = Url::parse("https://api.openai.com/v1/")?;
         let config = OpenAIConfig::new(api_key, base_url)
             .with_max_retries(10)
             .with_base_delay_ms(2000);
         let provider = OpenAIProvider::new(config);
         assert_eq!(provider.max_retries, 10);
         assert_eq!(provider.base_delay_ms, 2000);
+        Ok(())
     }
 
     #[test]
-    fn test_backoff_delay_calculation() {
+    fn test_backoff_delay_calculation() -> anyhow::Result<()> {
         let api_key = SecretString::new("test-key".into());
-        let base_url = Url::parse("https://api.openai.com/v1/").unwrap();
+        let base_url = Url::parse("https://api.openai.com/v1/")?;
         let config = OpenAIConfig::new(api_key, base_url).with_base_delay_ms(1000);
         let provider = OpenAIProvider::new(config);
 
@@ -312,5 +328,6 @@ mod tests {
         let delay1 = provider.calculate_backoff_delay(1);
         assert!(delay1.as_millis() >= 2000);
         assert!(delay1.as_millis() <= 2500);
+        Ok(())
     }
 }

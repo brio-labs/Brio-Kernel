@@ -84,11 +84,12 @@ impl AnthropicConfig {
     }
 
     /// Creates a config with default Anthropic base URL
-    pub fn with_api_key(api_key: SecretString) -> Self {
-        Self::new(
+    pub fn with_api_key(api_key: SecretString) -> anyhow::Result<Self> {
+        Ok(Self::new(
             api_key,
-            Url::parse("https://api.anthropic.com/v1/").expect("Valid Anthropic URL"),
-        )
+            Url::parse("https://api.anthropic.com/v1/")
+                .map_err(|e| anyhow::anyhow!("Invalid hardcoded URL: {}", e))?,
+        ))
     }
 
     /// Sets the maximum number of retries
@@ -191,29 +192,43 @@ impl AnthropicProvider {
         &self,
         provider_req: &AnthropicChatRequest,
     ) -> Result<ChatResponse, (InferenceError, bool)> {
-        let url = self.config.base_url.join("messages").map_err(|e| {
+        let request = self
+            .build_api_request(provider_req)
+            .map_err(|e| (e, false))?;
+
+        let res = request.send().await.map_err(|e| {
             (
-                InferenceError::ConfigError(format!("Invalid URL join: {}", e)),
-                false,
+                InferenceError::NetworkError(e.to_string()),
+                true, // Retry network errors
             )
         })?;
 
-        let res = self
+        self.map_api_response(res).await
+    }
+
+    fn build_api_request(
+        &self,
+        provider_req: &AnthropicChatRequest,
+    ) -> Result<reqwest::RequestBuilder, InferenceError> {
+        let url = self
+            .config
+            .base_url
+            .join("messages")
+            .map_err(|e| InferenceError::ConfigError(format!("Invalid URL join: {}", e)))?;
+
+        Ok(self
             .client
             .post(url)
             .header("x-api-key", self.config.api_key.expose_secret())
             .header("anthropic-version", &self.api_version)
             .header("Content-Type", "application/json")
-            .json(provider_req)
-            .send()
-            .await
-            .map_err(|e| {
-                (
-                    InferenceError::NetworkError(e.to_string()),
-                    true, // Retry network errors
-                )
-            })?;
+            .json(provider_req))
+    }
 
+    async fn map_api_response(
+        &self,
+        res: reqwest::Response,
+    ) -> Result<ChatResponse, (InferenceError, bool)> {
         match res.status() {
             StatusCode::OK => {
                 let body: AnthropicChatResponse = res.json().await.map_err(|e| {
@@ -341,26 +356,28 @@ mod tests {
     use secrecy::SecretString;
 
     #[test]
-    fn test_anthropic_config_creation() {
+    fn test_anthropic_config_creation() -> anyhow::Result<()> {
         let api_key = SecretString::new("test-key".into());
-        let base_url = Url::parse("https://api.anthropic.com/v1/").unwrap();
+        let base_url = Url::parse("https://api.anthropic.com/v1/")?;
         let config = AnthropicConfig::new(api_key, base_url.clone());
         assert_eq!(config.base_url, base_url);
         assert!(config.max_retries.is_none());
         assert!(config.base_delay_ms.is_none());
+        Ok(())
     }
 
     #[test]
-    fn test_anthropic_config_with_api_key() {
+    fn test_anthropic_config_with_api_key() -> anyhow::Result<()> {
         let api_key = SecretString::new("test-key".into());
-        let config = AnthropicConfig::with_api_key(api_key);
+        let config = AnthropicConfig::with_api_key(api_key)?;
         assert_eq!(config.base_url.as_str(), "https://api.anthropic.com/v1/");
+        Ok(())
     }
 
     #[test]
-    fn test_anthropic_config_with_retries() {
+    fn test_anthropic_config_with_retries() -> anyhow::Result<()> {
         let api_key = SecretString::new("test-key".into());
-        let base_url = Url::parse("https://api.anthropic.com/v1/").unwrap();
+        let base_url = Url::parse("https://api.anthropic.com/v1/")?;
         let config = AnthropicConfig::new(api_key, base_url)
             .with_max_retries(5)
             .with_base_delay_ms(500)
@@ -368,17 +385,19 @@ mod tests {
         assert_eq!(config.max_retries, Some(5));
         assert_eq!(config.base_delay_ms, Some(500));
         assert_eq!(config.max_tokens, Some(8192));
+        Ok(())
     }
 
     #[test]
-    fn test_anthropic_provider_new() {
+    fn test_anthropic_provider_new() -> anyhow::Result<()> {
         let api_key = SecretString::new("test-key".into());
-        let base_url = Url::parse("https://api.anthropic.com/v1/").unwrap();
+        let base_url = Url::parse("https://api.anthropic.com/v1/")?;
         let config = AnthropicConfig::new(api_key, base_url);
         let provider = AnthropicProvider::new(config);
         assert_eq!(provider.max_retries, DEFAULT_MAX_RETRIES);
         assert_eq!(provider.base_delay_ms, DEFAULT_BASE_DELAY_MS);
         assert_eq!(provider.api_version, DEFAULT_API_VERSION);
+        Ok(())
     }
 
     #[test]
@@ -420,9 +439,9 @@ mod tests {
     }
 
     #[test]
-    fn test_backoff_delay_calculation() {
+    fn test_backoff_delay_calculation() -> anyhow::Result<()> {
         let api_key = SecretString::new("test-key".into());
-        let base_url = Url::parse("https://api.anthropic.com/v1/").unwrap();
+        let base_url = Url::parse("https://api.anthropic.com/v1/")?;
         let config = AnthropicConfig::new(api_key, base_url).with_base_delay_ms(1000);
         let provider = AnthropicProvider::new(config);
 
@@ -433,5 +452,6 @@ mod tests {
         let delay1 = provider.calculate_backoff_delay(1);
         assert!(delay1.as_millis() >= 2000);
         assert!(delay1.as_millis() <= 2500);
+        Ok(())
     }
 }
