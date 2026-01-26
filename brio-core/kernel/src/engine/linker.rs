@@ -103,9 +103,7 @@ impl brio::core::pub_sub::Host for BrioHostState {
     }
 
     fn publish(&mut self, topic: String, data: brio::core::pub_sub::Payload) -> Result<(), String> {
-        // Enforce: anyone can publish? Or strict permissions?
-        // Let's enforce "mesh:send" for now.
-        // self.check_permission("mesh:send")?; // Optional
+        // TODO: Enforce "mesh:send" permission here if needed.
 
         let subscribers = self.event_bus().subscribers(&topic);
         if subscribers.is_empty() {
@@ -114,6 +112,7 @@ impl brio::core::pub_sub::Host for BrioHostState {
 
         let state = self.clone();
 
+        // Convert Payload
         let payload_enum = match data {
             brio::core::pub_sub::Payload::Json(s) => crate::engine::runner::EventPayload::Json(s),
             brio::core::pub_sub::Payload::Binary(b) => {
@@ -121,7 +120,6 @@ impl brio::core::pub_sub::Host for BrioHostState {
             }
         };
 
-        // Spawn logic
         tokio::spawn(async move {
             if let Some(registry) = state.plugin_registry() {
                 let engine = registry.engine();
@@ -129,9 +127,7 @@ impl brio::core::pub_sub::Host for BrioHostState {
 
                 for agent_id in subscribers {
                     if let Some(metadata) = registry.get(&agent_id) {
-                        // We need to clone payload for each agent?
-                        // Payload enum variants own the data.
-                        // We can clone the enum.
+                        // Clone data for each subscriber
                         let payload_clone = match &payload_enum {
                             crate::engine::runner::EventPayload::Json(s) => {
                                 crate::engine::runner::EventPayload::Json(s.clone())
